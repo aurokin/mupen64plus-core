@@ -67,6 +67,7 @@ static const gfx_plugin_functions dummy_gfx = {
     dummyvideo_ViStatusChanged,
     dummyvideo_ViWidthChanged,
     dummyvideo_ReadScreen2,
+    dummyvideo_ReadScreenDepth2,
     dummyvideo_SetRenderingCallback,
     dummyvideo_ResizeVideoOutput,
     dummyvideo_FBRead,
@@ -198,6 +199,7 @@ static m64p_error plugin_connect_gfx(m64p_dynlib_handle plugin_handle)
 
         /* set function pointers for optional functions */
         gfx.resizeVideoOutput = (ptr_ResizeVideoOutput)osal_dynlib_getproc(plugin_handle, "ResizeVideoOutput");
+        gfx.readScreenDepth = (ptr_ReadScreenDepth2)osal_dynlib_getproc(plugin_handle, "ReadScreenDepth2");
 
         /* check the version info */
         (*gfx.getVersion)(&PluginType, &PluginVersion, &APIVersion, NULL, NULL);
@@ -588,4 +590,3 @@ m64p_error plugin_check(void)
 
     return M64ERR_SUCCESS;
 }
-

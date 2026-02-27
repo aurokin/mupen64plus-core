@@ -474,6 +474,10 @@ static m64p_error main_execute_queued_command(m64p_command command, int param_in
             if (param_ptr == NULL)
                 return M64ERR_INPUT_ASSERT;
             return main_read_screen(param_ptr, param_int);
+        case M64CMD_READ_SCREEN_DEPTH:
+            if (param_ptr == NULL)
+                return M64ERR_INPUT_ASSERT;
+            return main_read_screen_depth(param_ptr, param_int);
         case M64CMD_RESET:
             return main_reset(param_int);
         case M64CMD_ADVANCE_FRAME:
@@ -1285,6 +1289,15 @@ m64p_error main_read_screen(void *pixels, int bFront)
 {
     int width_trash, height_trash;
     gfx.readScreen(pixels, &width_trash, &height_trash, bFront);
+    return M64ERR_SUCCESS;
+}
+
+m64p_error main_read_screen_depth(void *pixels, int bFront)
+{
+    int width_trash, height_trash;
+    if (gfx.readScreenDepth == NULL)
+        return M64ERR_UNSUPPORTED;
+    gfx.readScreenDepth(pixels, &width_trash, &height_trash, bFront);
     return M64ERR_SUCCESS;
 }
 

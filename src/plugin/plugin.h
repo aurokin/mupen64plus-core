@@ -40,6 +40,8 @@ extern CONTROL Controls[NUM_CONTROLLER];
 #define AUDIO_API_VERSION 0x20000
 #define INPUT_API_VERSION 0x20101
 
+typedef void (*ptr_ReadScreenDepth2)(void *dest, int *width, int *height, int front);
+
 /* video plugin function pointers */
 typedef struct _gfx_plugin_functions
 {
@@ -56,6 +58,7 @@ typedef struct _gfx_plugin_functions
 	ptr_ViStatusChanged  viStatusChanged;
 	ptr_ViWidthChanged   viWidthChanged;
 	ptr_ReadScreen2      readScreen;
+	ptr_ReadScreenDepth2 readScreenDepth;
 	ptr_SetRenderingCallback setRenderingCallback;
     ptr_ResizeVideoOutput    resizeVideoOutput;
 
@@ -122,4 +125,3 @@ typedef struct _rsp_plugin_functions
 extern rsp_plugin_functions rsp;
 
 #endif
-

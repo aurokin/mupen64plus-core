@@ -106,6 +106,11 @@ void dummyvideo_ReadScreen2 (void *dest, int *width, int *height, int front)
 
 }
 
+void dummyvideo_ReadScreenDepth2(void *dest, int *width, int *height, int front)
+{
+
+}
+
 void dummyvideo_SetRenderingCallback(void (*callback)(int))
 {
 
@@ -126,5 +131,4 @@ void dummyvideo_FBGetFrameBufferInfo(void *p)
 void dummyvideo_ResizeVideoOutput(int width, int height)
 {
 }
-
 
