@@ -171,8 +171,23 @@ typedef enum {
   M64CMD_PIF_OPEN,
   M64CMD_ROM_SET_SETTINGS,
   M64CMD_DISK_OPEN,
-  M64CMD_DISK_CLOSE
+  M64CMD_DISK_CLOSE,
+  M64CMD_INPUT_SET_STATE,
+  M64CMD_INPUT_QUEUE_STATE,
+  M64CMD_INPUT_CLEAR
 } m64p_command;
+
+typedef struct {
+  uint32_t controller;
+  uint32_t input_state;
+} m64p_controller_input_state;
+
+typedef struct {
+  uint32_t controller;
+  uint32_t input_state;
+  uint32_t frame_start;
+  uint32_t frame_end;
+} m64p_controller_input_queued_state;
 
 typedef struct {
   uint32_t address;
@@ -459,4 +474,3 @@ typedef struct {
 } m64p_video_extension_functions;
 
 #endif /* define M64P_TYPES_H */
-

@@ -24,6 +24,7 @@
 #define __MAIN_H__
 
 #include <stdint.h>
+#include <stddef.h>
 
 #include "api/m64p_types.h"
 #include "main/cheat.h"
@@ -85,6 +86,16 @@ void main_state_set_slot(int slot);
 void main_state_inc_slot(void);
 void main_state_load(const char *filename);
 void main_state_save(int format, const char *filename);
+int  main_get_current_frame(void);
+int  main_input_get_injected(int control_id, uint32_t* input);
+m64p_error main_input_set_state(unsigned int control_id, uint32_t input_state);
+m64p_error main_input_queue_state(unsigned int control_id, uint32_t input_state, uint32_t frame_start, uint32_t frame_end);
+m64p_error main_input_clear_state(int control_id);
+int  main_is_emu_thread(void);
+void main_pump_queued_commands(void);
+m64p_error main_enqueue_or_exec_command(m64p_command command, int param_int, const void* param_ptr, size_t param_size);
+m64p_error main_enqueue_or_exec_command_ptr(m64p_command command, int param_int, void* param_ptr);
+void main_cleanup_command_queue(void);
 
 m64p_error main_core_state_query(m64p_core_param param, int *rval);
 m64p_error main_core_state_set(m64p_core_param param, int val);
@@ -105,4 +116,3 @@ m64p_error open_pif(const unsigned char* pifimage, unsigned int size);
 m64p_error close_pif(void);
 
 #endif /* __MAIN_H__ */
-

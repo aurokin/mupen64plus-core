@@ -90,6 +90,12 @@ static m64p_error input_plugin_get_input(void* opaque, uint32_t* input_)
         return M64ERR_SYSTEM_FAIL;
     }
 
+    if (main_input_get_injected(cin_compat->control_id, input_) == 1) {
+        cin_compat->last_pak_type = Controls[cin_compat->control_id].Plugin;
+        cin_compat->last_input = *input_;
+        return M64ERR_SUCCESS;
+    }
+
 
     /* has Controls[i].Plugin changed since last call */
     if (cin_compat->last_pak_type != Controls[cin_compat->control_id].Plugin) {

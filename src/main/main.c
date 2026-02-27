@@ -135,6 +135,42 @@ static void* l_paks[GAME_CONTROLLERS_COUNT][PAK_MAX_SIZE];
 static const struct pak_interface* l_ipaks[PAK_MAX_SIZE];
 static size_t l_pak_type_idx[6];
 
+/* Agent-driven controller injection state */
+enum { AGENT_INPUT_MAX_EVENTS = 8192 };
+struct agent_input_event
+{
+    uint32_t input_state;
+    uint32_t frame_start;
+    uint32_t frame_end;
+};
+
+static SDL_mutex* l_AgentInputLock = NULL;
+static int l_AgentInputAnyEnabled = 0;
+static int l_AgentInputPortEnabled[GAME_CONTROLLERS_COUNT];
+static uint32_t l_AgentInputImmediate[GAME_CONTROLLERS_COUNT];
+static uint32_t l_AgentInputLatched[GAME_CONTROLLERS_COUNT];
+static int l_AgentInputLastFrame[GAME_CONTROLLERS_COUNT];
+static unsigned int l_AgentInputEventCount[GAME_CONTROLLERS_COUNT];
+static struct agent_input_event l_AgentInputEvents[GAME_CONTROLLERS_COUNT][AGENT_INPUT_MAX_EVENTS];
+
+struct queued_core_command
+{
+    m64p_command command;
+    int param_int;
+    void* param_ptr;
+    int owns_param;
+    int wait_for_result;
+    int done;
+    m64p_error result;
+    SDL_cond* done_cond;
+    struct queued_core_command* next;
+};
+
+static SDL_mutex* l_QueuedCommandsLock = NULL;
+static struct queued_core_command* l_QueuedCommandsHead = NULL;
+static struct queued_core_command* l_QueuedCommandsTail = NULL;
+static SDL_threadID l_EmuThreadId = 0;
+
 /* PRNG state - used for Mempaks ID generation */
 static struct xoshiro256pp_state l_mpk_idgen;
 
@@ -383,7 +419,255 @@ static void main_check_inputs(void)
 #ifdef WITH_LIRC
     lircCheckInput();
 #endif
+    main_pump_queued_commands();
     SDL_PumpEvents();
+    main_pump_queued_commands();
+}
+
+static int main_ensure_command_queue_lock(void)
+{
+    if (l_QueuedCommandsLock == NULL)
+    {
+        l_QueuedCommandsLock = SDL_CreateMutex();
+        if (l_QueuedCommandsLock == NULL)
+        {
+            DebugMessage(M64MSG_ERROR, "Failed to create queued command mutex: %s", SDL_GetError());
+            return 0;
+        }
+    }
+    return 1;
+}
+
+int main_is_emu_thread(void)
+{
+    return (l_EmuThreadId != 0 && SDL_ThreadID() == l_EmuThreadId);
+}
+
+static m64p_error main_execute_queued_command(m64p_command command, int param_int, void* param_ptr)
+{
+    switch (command)
+    {
+        case M64CMD_STOP:
+            return main_core_state_set(M64CORE_EMU_STATE, M64EMU_STOPPED);
+        case M64CMD_PAUSE:
+            return main_core_state_set(M64CORE_EMU_STATE, M64EMU_PAUSED);
+        case M64CMD_RESUME:
+            return main_core_state_set(M64CORE_EMU_STATE, M64EMU_RUNNING);
+        case M64CMD_CORE_STATE_SET:
+            if (param_ptr == NULL)
+                return M64ERR_INPUT_ASSERT;
+            return main_core_state_set((m64p_core_param) param_int, *((int*) param_ptr));
+        case M64CMD_STATE_LOAD:
+            main_state_load((char*) param_ptr);
+            return M64ERR_SUCCESS;
+        case M64CMD_STATE_SAVE:
+            main_state_save(param_int, (char*) param_ptr);
+            return M64ERR_SUCCESS;
+        case M64CMD_STATE_SET_SLOT:
+            if (param_int < 0 || param_int > 9)
+                return M64ERR_INPUT_INVALID;
+            return main_core_state_set(M64CORE_SAVESTATE_SLOT, param_int);
+        case M64CMD_TAKE_NEXT_SCREENSHOT:
+            main_take_next_screenshot();
+            return M64ERR_SUCCESS;
+        case M64CMD_READ_SCREEN:
+            if (param_ptr == NULL)
+                return M64ERR_INPUT_ASSERT;
+            return main_read_screen(param_ptr, param_int);
+        case M64CMD_RESET:
+            return main_reset(param_int);
+        case M64CMD_ADVANCE_FRAME:
+            main_advance_one();
+            return M64ERR_SUCCESS;
+        case M64CMD_INPUT_SET_STATE:
+        {
+            m64p_controller_input_state* state = (m64p_controller_input_state*) param_ptr;
+            if (state == NULL)
+                return M64ERR_INPUT_ASSERT;
+            return main_input_set_state(state->controller, state->input_state);
+        }
+        case M64CMD_INPUT_QUEUE_STATE:
+        {
+            m64p_controller_input_queued_state* state = (m64p_controller_input_queued_state*) param_ptr;
+            if (state == NULL)
+                return M64ERR_INPUT_ASSERT;
+            return main_input_queue_state(state->controller, state->input_state, state->frame_start, state->frame_end);
+        }
+        case M64CMD_INPUT_CLEAR:
+            return main_input_clear_state(param_int);
+        default:
+            return M64ERR_INPUT_INVALID;
+    }
+}
+
+void main_pump_queued_commands(void)
+{
+    struct queued_core_command* cmd;
+
+    if (!main_ensure_command_queue_lock() || !main_is_emu_thread())
+        return;
+
+    for (;;)
+    {
+        SDL_LockMutex(l_QueuedCommandsLock);
+        cmd = l_QueuedCommandsHead;
+        if (cmd != NULL)
+        {
+            l_QueuedCommandsHead = cmd->next;
+            if (l_QueuedCommandsHead == NULL)
+                l_QueuedCommandsTail = NULL;
+        }
+        SDL_UnlockMutex(l_QueuedCommandsLock);
+
+        if (cmd == NULL)
+            break;
+
+        cmd->result = main_execute_queued_command(cmd->command, cmd->param_int, cmd->param_ptr);
+
+        SDL_LockMutex(l_QueuedCommandsLock);
+        cmd->done = 1;
+        if (cmd->wait_for_result && cmd->done_cond != NULL)
+            SDL_CondSignal(cmd->done_cond);
+        SDL_UnlockMutex(l_QueuedCommandsLock);
+
+        if (!cmd->wait_for_result)
+        {
+            if (cmd->done_cond != NULL)
+                SDL_DestroyCond(cmd->done_cond);
+            if (cmd->owns_param)
+                free(cmd->param_ptr);
+            free(cmd);
+        }
+    }
+}
+
+static void main_fail_all_queued_commands(m64p_error result)
+{
+    struct queued_core_command* cmd;
+
+    if (l_QueuedCommandsLock == NULL)
+        return;
+
+    SDL_LockMutex(l_QueuedCommandsLock);
+    while (l_QueuedCommandsHead != NULL)
+    {
+        cmd = l_QueuedCommandsHead;
+        l_QueuedCommandsHead = cmd->next;
+
+        cmd->result = result;
+        cmd->done = 1;
+
+        if (cmd->wait_for_result && cmd->done_cond != NULL)
+        {
+            SDL_CondSignal(cmd->done_cond);
+        }
+        else
+        {
+            if (cmd->done_cond != NULL)
+                SDL_DestroyCond(cmd->done_cond);
+            if (cmd->owns_param)
+                free(cmd->param_ptr);
+            free(cmd);
+        }
+    }
+    l_QueuedCommandsTail = NULL;
+    SDL_UnlockMutex(l_QueuedCommandsLock);
+}
+
+void main_cleanup_command_queue(void)
+{
+    main_fail_all_queued_commands(M64ERR_INVALID_STATE);
+
+    if (l_QueuedCommandsLock != NULL)
+    {
+        SDL_DestroyMutex(l_QueuedCommandsLock);
+        l_QueuedCommandsLock = NULL;
+    }
+}
+
+static m64p_error main_enqueue_or_exec_command_common(m64p_command command, int param_int, void* param_ptr, size_t param_size, int copy_param)
+{
+    struct queued_core_command* cmd;
+    m64p_error result;
+
+    if (main_is_emu_thread() || !g_EmulatorRunning)
+        return main_execute_queued_command(command, param_int, (void*) param_ptr);
+
+    if (!main_ensure_command_queue_lock())
+        return M64ERR_SYSTEM_FAIL;
+
+    cmd = (struct queued_core_command*) calloc(1, sizeof(*cmd));
+    if (cmd == NULL)
+        return M64ERR_NO_MEMORY;
+
+    cmd->command = command;
+    cmd->param_int = param_int;
+    cmd->wait_for_result = 1;
+    cmd->owns_param = 0;
+    cmd->done_cond = SDL_CreateCond();
+    if (cmd->done_cond == NULL)
+    {
+        free(cmd);
+        return M64ERR_SYSTEM_FAIL;
+    }
+
+    if (param_ptr != NULL && copy_param)
+    {
+        if (param_size == 0)
+        {
+            SDL_DestroyCond(cmd->done_cond);
+            free(cmd);
+            return M64ERR_INPUT_ASSERT;
+        }
+        cmd->param_ptr = malloc(param_size);
+        if (cmd->param_ptr == NULL)
+        {
+            SDL_DestroyCond(cmd->done_cond);
+            free(cmd);
+            return M64ERR_NO_MEMORY;
+        }
+        memcpy(cmd->param_ptr, param_ptr, param_size);
+        cmd->owns_param = 1;
+    }
+    else
+    {
+        cmd->param_ptr = param_ptr;
+    }
+
+    SDL_LockMutex(l_QueuedCommandsLock);
+    if (l_QueuedCommandsTail == NULL)
+    {
+        l_QueuedCommandsHead = cmd;
+        l_QueuedCommandsTail = cmd;
+    }
+    else
+    {
+        l_QueuedCommandsTail->next = cmd;
+        l_QueuedCommandsTail = cmd;
+    }
+
+    while (!cmd->done)
+    {
+        SDL_CondWait(cmd->done_cond, l_QueuedCommandsLock);
+    }
+    result = cmd->result;
+    SDL_UnlockMutex(l_QueuedCommandsLock);
+
+    SDL_DestroyCond(cmd->done_cond);
+    if (cmd->owns_param)
+        free(cmd->param_ptr);
+    free(cmd);
+    return result;
+}
+
+m64p_error main_enqueue_or_exec_command(m64p_command command, int param_int, const void* param_ptr, size_t param_size)
+{
+    return main_enqueue_or_exec_command_common(command, param_int, (void*) param_ptr, param_size, 1);
+}
+
+m64p_error main_enqueue_or_exec_command_ptr(m64p_command command, int param_int, void* param_ptr)
+{
+    return main_enqueue_or_exec_command_common(command, param_int, param_ptr, 0, 0);
 }
 
 /*********************************************************************************************************
@@ -639,6 +923,163 @@ static void main_draw_volume_osd(void)
 void main_take_next_screenshot(void)
 {
     l_TakeScreenshot = l_CurrentFrame + 1;
+}
+
+static int main_input_init_lock(void)
+{
+    if (l_AgentInputLock == NULL)
+    {
+        l_AgentInputLock = SDL_CreateMutex();
+        if (l_AgentInputLock == NULL)
+        {
+            DebugMessage(M64MSG_ERROR, "Failed to create controller injection mutex: %s", SDL_GetError());
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static void main_input_reset_port_locked(unsigned int control_id)
+{
+    l_AgentInputPortEnabled[control_id] = 0;
+    l_AgentInputImmediate[control_id] = 0;
+    l_AgentInputLatched[control_id] = 0;
+    l_AgentInputLastFrame[control_id] = -1;
+    l_AgentInputEventCount[control_id] = 0;
+}
+
+int main_get_current_frame(void)
+{
+    return l_CurrentFrame;
+}
+
+int main_input_get_injected(int control_id, uint32_t* input)
+{
+    uint32_t frame;
+    unsigned int i;
+    unsigned int dst;
+
+    if (input == NULL || control_id < 0 || control_id >= GAME_CONTROLLERS_COUNT || !l_AgentInputAnyEnabled)
+        return 0;
+    if (!main_input_init_lock())
+        return 0;
+
+    SDL_LockMutex(l_AgentInputLock);
+    if (!l_AgentInputPortEnabled[control_id])
+    {
+        SDL_UnlockMutex(l_AgentInputLock);
+        return 0;
+    }
+
+    frame = (uint32_t) l_CurrentFrame;
+    if ((uint32_t) l_AgentInputLastFrame[control_id] != frame)
+    {
+        uint32_t value = l_AgentInputImmediate[control_id];
+        unsigned int count = l_AgentInputEventCount[control_id];
+
+        dst = 0;
+        for (i = 0; i < count; ++i)
+        {
+            struct agent_input_event ev = l_AgentInputEvents[control_id][i];
+
+            if (ev.frame_end >= frame)
+            {
+                if (dst != i)
+                    l_AgentInputEvents[control_id][dst] = ev;
+                ++dst;
+            }
+
+            if (frame >= ev.frame_start && frame <= ev.frame_end)
+                value = ev.input_state;
+        }
+
+        l_AgentInputEventCount[control_id] = dst;
+        l_AgentInputLatched[control_id] = value;
+        l_AgentInputLastFrame[control_id] = (int) frame;
+    }
+
+    *input = l_AgentInputLatched[control_id];
+    SDL_UnlockMutex(l_AgentInputLock);
+    return 1;
+}
+
+m64p_error main_input_set_state(unsigned int control_id, uint32_t input_state)
+{
+    if (control_id >= GAME_CONTROLLERS_COUNT)
+        return M64ERR_INPUT_INVALID;
+    if (!main_input_init_lock())
+        return M64ERR_SYSTEM_FAIL;
+
+    SDL_LockMutex(l_AgentInputLock);
+    l_AgentInputAnyEnabled = 1;
+    l_AgentInputPortEnabled[control_id] = 1;
+    l_AgentInputImmediate[control_id] = input_state;
+    l_AgentInputLastFrame[control_id] = -1;
+    SDL_UnlockMutex(l_AgentInputLock);
+    return M64ERR_SUCCESS;
+}
+
+m64p_error main_input_queue_state(unsigned int control_id, uint32_t input_state, uint32_t frame_start, uint32_t frame_end)
+{
+    unsigned int count;
+
+    if (control_id >= GAME_CONTROLLERS_COUNT || frame_end < frame_start)
+        return M64ERR_INPUT_INVALID;
+    if (!main_input_init_lock())
+        return M64ERR_SYSTEM_FAIL;
+
+    SDL_LockMutex(l_AgentInputLock);
+    count = l_AgentInputEventCount[control_id];
+    if (count >= AGENT_INPUT_MAX_EVENTS)
+    {
+        SDL_UnlockMutex(l_AgentInputLock);
+        return M64ERR_NO_MEMORY;
+    }
+
+    l_AgentInputEvents[control_id][count].input_state = input_state;
+    l_AgentInputEvents[control_id][count].frame_start = frame_start;
+    l_AgentInputEvents[control_id][count].frame_end = frame_end;
+    l_AgentInputEventCount[control_id] = count + 1;
+
+    l_AgentInputAnyEnabled = 1;
+    l_AgentInputPortEnabled[control_id] = 1;
+    l_AgentInputLastFrame[control_id] = -1;
+    SDL_UnlockMutex(l_AgentInputLock);
+    return M64ERR_SUCCESS;
+}
+
+m64p_error main_input_clear_state(int control_id)
+{
+    unsigned int i;
+    int any_enabled = 0;
+
+    if (control_id >= GAME_CONTROLLERS_COUNT)
+        return M64ERR_INPUT_INVALID;
+    if (!main_input_init_lock())
+        return M64ERR_SYSTEM_FAIL;
+
+    SDL_LockMutex(l_AgentInputLock);
+    if (control_id < 0)
+    {
+        for (i = 0; i < GAME_CONTROLLERS_COUNT; ++i)
+            main_input_reset_port_locked(i);
+    }
+    else
+    {
+        main_input_reset_port_locked((unsigned int) control_id);
+    }
+
+    for (i = 0; i < GAME_CONTROLLERS_COUNT; ++i)
+    {
+        if (l_AgentInputPortEnabled[i])
+        {
+            any_enabled = 1;
+            break;
+        }
+    }
+    l_AgentInputAnyEnabled = any_enabled;
+    SDL_UnlockMutex(l_AgentInputLock);
+    return M64ERR_SUCCESS;
 }
 
 void main_state_set_slot(int slot)
@@ -1941,6 +2382,7 @@ m64p_error main_run(void)
 
     /* initialize frame counter */
     l_CurrentFrame = 0;
+    main_input_clear_state(-1);
 
     /* initialize the on-screen display */
     if (ConfigGetParamBool(g_CoreConfig, "OnScreenDisplay"))
@@ -1966,12 +2408,14 @@ m64p_error main_run(void)
     /* Startup message on the OSD */
     osd_new_message(OSD_MIDDLE_CENTER, "Mupen64Plus Started...");
 
+    l_EmuThreadId = SDL_ThreadID();
     g_EmulatorRunning = 1;
     StateChanged(M64CORE_EMU_STATE, M64EMU_RUNNING);
 
     poweron_device(&g_dev);
     pif_bootrom_hle_execute(&g_dev.r4300);
     run_device(&g_dev);
+    main_fail_all_queued_commands(M64ERR_INVALID_STATE);
 
     /* now begin to shut down */
 #ifdef WITH_LIRC
@@ -2013,6 +2457,7 @@ m64p_error main_run(void)
     gfx.romClosed();
 
     // clean up
+    l_EmuThreadId = 0;
     g_EmulatorRunning = 0;
     StateChanged(M64CORE_EMU_STATE, M64EMU_STOPPED);
 
@@ -2027,6 +2472,8 @@ on_input_open_failure:
 on_audio_open_failure:
     gfx.romClosed();
 on_gfx_open_failure:
+    main_fail_all_queued_commands(M64ERR_INVALID_STATE);
+    l_EmuThreadId = 0;
     /* release gb_carts */
     for(i = 0; i < GAME_CONTROLLERS_COUNT; ++i) {
         if (!Controls[i].RawData  && (Controls[i].Type == CONT_TYPE_STANDARD) && g_dev.gb_carts[i].read_gb_cart != NULL) {
