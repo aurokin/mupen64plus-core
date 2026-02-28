@@ -867,22 +867,15 @@ void main_toggle_pause(void)
     if (g_rom_pause)
     {
         DebugMessage(M64MSG_STATUS, "Emulation continued.");
-        if(l_msgPause)
-        {
-            osd_delete_message(l_msgPause);
-            l_msgPause = NULL;
-        }
+        l_msgPause = NULL;
         StateChanged(M64CORE_EMU_STATE, M64EMU_RUNNING);
     }
     else
     {
-        if(l_msgPause)
-            osd_delete_message(l_msgPause);
-
         DebugMessage(M64MSG_STATUS, "Emulation paused.");
-        l_msgPause = osd_new_message(OSD_MIDDLE_CENTER, "Paused");
-        osd_message_set_static(l_msgPause);
-        osd_message_set_user_managed(l_msgPause);
+        /* Agent mode can pause/resume rapidly; avoid pause OSD message churn which
+         * can destabilize the graphics stack on some drivers/plugins. */
+        l_msgPause = NULL;
         StateChanged(M64CORE_EMU_STATE, M64EMU_PAUSED);
     }
 

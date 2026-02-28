@@ -476,14 +476,14 @@ int event_set_core_defaults(void)
     ConfigSetDefaultFloat(l_CoreEventsConfig, "Version", CONFIG_PARAM_VERSION,  "Mupen64Plus CoreEvents config parameter set version number.  Please don't change this version number.");
     /* Keyboard presses mapped to core functions */
 #ifndef NO_KEYBINDINGS
-    char kbdSaveSlotStr[sizeof(kbdSaveSlot)+1];
-    char kbdSaveSlotHelpStr[27];
+    char kbdSaveSlotStr[sizeof(kbdSaveSlot) + 12];
+    char kbdSaveSlotHelpStr[64];
     int key = SDL_SCANCODE_UNKNOWN;
     for (int slot = 0; slot < 10; slot++)
     {
         key = slot == 0 ? SDL_SCANCODE_0 : SDL_SCANCODE_1 + (slot - 1);
-        sprintf(kbdSaveSlotStr, "%s%i", kbdSaveSlot, slot);
-        sprintf(kbdSaveSlotHelpStr, "SDL keysym for save slot %i", slot);
+        snprintf(kbdSaveSlotStr, sizeof(kbdSaveSlotStr), "%s%i", kbdSaveSlot, slot);
+        snprintf(kbdSaveSlotHelpStr, sizeof(kbdSaveSlotHelpStr), "SDL keysym for save slot %i", slot);
         ConfigSetDefaultInt(l_CoreEventsConfig, kbdSaveSlotStr, sdl_native2keysym(key), kbdSaveSlotHelpStr);
     }
     ConfigSetDefaultInt(l_CoreEventsConfig, kbdStop, sdl_native2keysym(SDL_SCANCODE_ESCAPE),          "SDL keysym for stopping the emulator");
@@ -527,11 +527,11 @@ int event_set_core_defaults(void)
 #ifndef NO_KEYBINDINGS
 static int get_saveslot_from_keysym(int keysym)
 {
-    char kbdSaveSlotStr[sizeof(kbdSaveSlot)+1];
+    char kbdSaveSlotStr[sizeof(kbdSaveSlot) + 12];
     int kbdSaveSlotKey;
     for (int slot = 0; slot < 10; slot++)
     {
-        sprintf(kbdSaveSlotStr, "%s%i", kbdSaveSlot, slot);
+        snprintf(kbdSaveSlotStr, sizeof(kbdSaveSlotStr), "%s%i", kbdSaveSlot, slot);
         kbdSaveSlotKey = ConfigGetParamInt(l_CoreEventsConfig, kbdSaveSlotStr);
         if (keysym == sdl_keysym2native(kbdSaveSlotKey))
             return slot;
@@ -639,4 +639,3 @@ void event_set_gameshark(int active)
     // notify front-end application that gameshark button state has changed
     StateChanged(M64CORE_INPUT_GAMESHARK, GamesharkActive);
 }
-

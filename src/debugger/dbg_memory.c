@@ -41,6 +41,7 @@
 /* we must define PACKAGE so that bfd.h (which is included from dis-asm.h) doesn't throw an error */
 #define PACKAGE "mupen64plus-core"
 #include <dis-asm.h>
+#include <stdio.h>
 #include <stdarg.h>
 
 static int  lines_recompiled;
@@ -62,24 +63,34 @@ void process_opcode_out(void *strm, const char *fmt, ...)
     va_start(ap, fmt);
     char *arg;
     char buff[256];
+    size_t used;
+    size_t avail;
 
     if (num_decoded==0)
     {
         if (strcmp(fmt,"%s")==0)
         {
             arg = va_arg(ap, char*);
-            strcpy(opcode_recompiled[lines_recompiled],arg);
+            snprintf(opcode_recompiled[lines_recompiled], sizeof(opcode_recompiled[lines_recompiled]), "%s", arg);
         }
         else
-            strcpy(opcode_recompiled[lines_recompiled],"OPCODE-X");
+            snprintf(opcode_recompiled[lines_recompiled], sizeof(opcode_recompiled[lines_recompiled]), "%s", "OPCODE-X");
         num_decoded++;
         *(args_recompiled[lines_recompiled])=0;
     }
     else
     {
-        vsprintf(buff, fmt, ap);
-        sprintf(args_recompiled[lines_recompiled],"%s%s",
-                args_recompiled[lines_recompiled],buff);
+        size_t args_cap = sizeof(args_recompiled[lines_recompiled]);
+        vsnprintf(buff, sizeof(buff), fmt, ap);
+        used = strnlen(args_recompiled[lines_recompiled], args_cap);
+        if (used >= args_cap)
+        {
+            used = args_cap - 1;
+            args_recompiled[lines_recompiled][used] = '\0';
+        }
+        avail = args_cap - used;
+        if (avail > 1)
+            snprintf(args_recompiled[lines_recompiled] + used, avail, "%s", buff);
     }
     va_end(ap);
 }
@@ -147,8 +158,8 @@ static void decode_recompiled(struct r4300_core* r4300, uint32_t addr)
 
     if (r4300->cached_interp.blocks[addr>>12]->block[(addr&0xFFF)/4].ops == r4300->cached_interp.not_compiled)
     {
-        strcpy(opcode_recompiled[0],"INVLD");
-        strcpy(args_recompiled[0],"NOTCOMPILED");
+        snprintf(opcode_recompiled[0], sizeof(opcode_recompiled[0]), "%s", "INVLD");
+        snprintf(args_recompiled[0], sizeof(args_recompiled[0]), "%s", "NOTCOMPILED");
         opaddr_recompiled[0] = (void *) 0;
         addr_recompiled=0;
         lines_recompiled++;
